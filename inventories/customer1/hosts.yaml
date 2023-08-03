@@ -1,0 +1,17 @@
+---
+# file: hosts.yaml
+
+plugin: django_drf
+customer_id: 1
+cache: true
+cache_plugin: ansible.builtin.jsonfile
+cache_timeout: 7200
+cache_connection: /tmp/ansible_inventory_cache
+strict: true
+groups:
+  os_linux: "operating_system.name|lower is search('linux')"
+  os_windows: |
+    operating_system.name|lower is search('windows') and
+    operating_system.name is not search('2003')
+
+...

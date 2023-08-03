@@ -1,0 +1,24 @@
+---
+# handlers/main.yml
+
+- name: reload sysctl
+  command: sysctl --load /etc/sysctl.d/podman.conf
+
+- name: test oracle connection
+  uri:
+    url: '{{ url }}'
+    method: GET
+    headers:
+      Accept: application/json
+    status_code: 200
+    validate_certs: false
+  failed_when: false
+  # failed_when: not test_oracle.json.data|split(".")|first|replace("T", " ")|to_datetime
+  vars:
+    config: "{{ item.config|map('dict2items')|flatten|items2dict }}"
+    url: "http://127.0.0.1:{{ config.PORT }}{{ [config.VIRTUALDIRPATH|default('/'), 'test-oracle']|path_join }}"
+  loop: "{{ docker_projects }}"
+  loop_control:
+    label: '{{ url }}'
+
+...

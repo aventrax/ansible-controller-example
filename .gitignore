@@ -1,0 +1,6 @@
+*.retry
+.pwd
+orchestrate_web.yaml
+.django_drf-tokenfile
+__pycache__
+.vscode/

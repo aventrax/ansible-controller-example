@@ -1,0 +1,302 @@
+---
+# file: tasks/deploy_apps.yaml
+
+#
+# Preparation stuff
+
+- name: Git clone, it stops if any local modification is present 
+  ansible.builtin.git:
+    repo: 'git@git.domain.com:{{ item.git_project }}'
+    dest: "{{ [docker_base, 'apps', item.name]|path_join }}"
+    version: '{{ item.git_version }}'
+    accept_hostkey: true
+  loop: '{{ docker_projects}}'
+  loop_control:
+    label: "{{ item.name }}"
+  environment: "{{ git_ssh_command|default(omit) }}"
+
+- name: Find existing dotenv files
+  ansible.builtin.find:
+    paths: "{{ [docker_base, 'apps', item.name]|path_join }}"
+    file_type: file
+    patterns: ['.env*']
+    depth: 2
+    hidden: true
+    recurse: true
+  loop: '{{ docker_projects}}'
+  loop_control:
+    label: "{{ item.name }}"
+  register: dotenv_files
+
+
+#
+# Enriching docker_project with new dynamic variables
+
+- name: Build a list of updates
+  ansible.builtin.set_fact:
+    update_list: "{{ update_list + update }}"
+  loop: "{{ dotenv_files|json_query(query) }}"
+  loop_control:
+    index_var: idx
+    label: "{{ item.item.name }}"
+  vars:
+    query: "results[*].{item: item, dotenv_example: files[?contains(@.path, 'example') == `true`].path, dotenv_exists: files[?ends_with(@.path, '.env') == `true`].path|length(@)}"
+    update_list: []
+    update:
+    - path: docker_projects[{{ idx }}].dotenv_example
+      value: '{{ item.dotenv_example|first }}'
+    - path: docker_projects[{{ idx }}].dotenv
+      value: "{{ [item.dotenv_example|first|dirname, '.env']|path_join }}"
+    - path: docker_projects[{{ idx }}].dotenv_exists
+      value: '{{ item.dotenv_exists|bool }}'
+    - path: docker_projects[{{ idx }}].project_base
+      value: "{{ [docker_base, 'apps', item.item.name]|path_join }}"
+    - path: docker_projects[{{ idx }}].logpath
+      value: "{{ [docker_base, 'logs', item.item.name]|path_join }}"
+    - path: docker_projects[{{ idx }}].image_name
+      value: "{{ item.item.git_project|split('/')|last|lower }}"
+    - path: docker_projects[{{ idx }}].config
+      value: '{{ docker_projects[idx].config + additional_configs }}'
+    additional_configs:
+    - SITE: "{{ customer.name|default('Test Site') }}"
+    - CODE: "{{ customer.code|default('DEV') }}"
+    - IP_ADDRESS: 0.0.0.0
+    - LOGPATH: "{{ [docker_base, 'logs', item.item.name]|path_join }}"
+
+- name: Make the updates (returns a new item)
+  ansible.utils.update_fact:
+    updates: "{{ update_list }}"
+  changed_when: false
+  register: updated
+
+- name: Replace the original variable
+  ansible.builtin.set_fact:
+    docker_projects: '{{ updated.docker_projects}}'
+
+
+#
+# BEGIN container creation
+
+- name: Create log folder
+  ansible.builtin.file:
+    path: '{{ item.logpath }}'
+    state: directory
+  loop: '{{ docker_projects }}'
+  loop_control:
+    label: '{{ item.logpath }}'
+
+- name: Create dotenv from example
+  ansible.builtin.copy:
+    src: '{{ item.dotenv_example }}'
+    dest: '{{ item.dotenv }}'
+    remote_src: true
+  when: not item.dotenv_exists
+  loop: '{{ docker_projects }}'
+  loop_control:
+    label: "{{ item.dotenv }}"
+
+- name: Checking config variables
+  ansible.builtin.lineinfile:
+    path: '{{ dotenv }}'
+    regexp: '^[# ]*{{ config_key }}='
+    line: '{{ config_key }}="{{ config_value }}"'
+  vars:
+    dotenv: '{{ item.0.dotenv }}'
+    config_key: "{{ (item.1|dict2items|first)['key'] }}"
+    config_value: "{{ (item.1|dict2items|first)['value'] }}"
+  loop: "{{ docker_projects|subelements('config') }}"
+  loop_control:
+    label: "{{ dotenv }}, {{ config_key }}={{ config_value }}"
+
+- name: Remove INSTANTCLIENT from config (CORREGGERE,SOLO COMMENTARE)
+  ansible.builtin.lineinfile:
+    path: '{{ item.dotenv }}'
+    regexp: '^INSTANTCLIENT'
+    state: absent
+  loop: '{{ docker_projects }}'
+  loop_control:
+    label: "{{ item.dotenv }}"
+
+# - name: Create the image
+#   containers.podman.podman_image:
+#     name: "{{ item.image_name }}"
+#     path: '{{ item.dotenv|dirname }}'
+#     build:
+#       cache: no
+#       force_rm: true
+#       format: docker
+#   loop: "{{ docker_projects }}"
+#   loop_control:
+#     label: "{{ item.image_name }}"
+
+# # Both env and env_file should generate environmental variables within the container
+# # but env_file seems to have a problem not trimming the double quotes.
+# # Issue: https://github.com/containers/podman-compose/issues/721
+
+# - name: Create the container
+#   containers.podman.podman_container:
+#     name: '{{ item.name|lower }}'
+#     image: "localhost/{{ item.image_name }}:latest"
+#     state: present
+#     restart_policy: "on-failure"
+#     ports:
+#     - "{{ config.PORT }}:{{ config.PORT }}"
+#     volumes:
+#     - "{{ config.LOGPATH }}:/app/logs"
+#     env: "{{ config }}"
+#     # env_file: "{{ item.project_base }}/.env"  # ATTENZIONE: Non usare MAI per problemi doppi apici
+#   loop: "{{ docker_projects }}"
+#   vars:
+#     config: "{{ item.config|map('dict2items')|flatten|items2dict }}"
+#   notify: test oracle connection
+
+
+# Use podman-compose to build the image and create the container named "correctly"
+# This is for compatibility reasons; collegues using podman-compose manually must
+# work on the same image and container name as ansible, so I decided to maintain
+# composer's defaults.
+
+- block:
+
+  - name: Stop pre-existing container if any
+    ansible.builtin.command: ~/.local/bin/podman-compose down
+    args:
+      chdir: '{{ item.project_base }}'
+    loop: "{{ docker_projects }}"
+    loop_control:
+      label: "{{ item.name }}"
+
+  - name: Create a stopped container
+    ansible.builtin.command: ~/.local/bin/podman-compose up --build --no-start
+    environment: '{{ proxy_env|default(omit) }}'
+    args:
+      chdir: '{{ item.project_base }}'
+    loop: "{{ docker_projects }}"
+    loop_control:
+      label: "{{ item.name }}"
+
+  - name: List containers
+    ansible.builtin.command: podman ps -a --format json
+    changed_when: false
+    register: podman_ps
+
+  - name: Create a list of containers
+    ansible.builtin.set_fact:
+      containers: "{{ containers|default([]) + item.containers  }}"
+    loop: "{{ podman_ps.stdout|from_json|json_query(qry)|selectattr('working_dir', 'in', projects_dirs) }}"
+    loop_control:
+      label: '{{ item.working_dir }}'
+    vars:
+      projects_dirs: "{{ docker_projects|map(attribute='project_base')|list }}"
+      qry: '[*].{working_dir: Labels."com.docker.compose.project.working_dir", containers: Names }'
+
+  - name: Create a service file 
+    containers.podman.podman_generate_systemd:
+      name: '{{ item }}'
+      dest: ~/.config/systemd/user/
+      new: true
+      restart_policy: "on-failure"
+      restart_sec: "{{ omit if podman_version is version('4', 'lt') else '5' }}"
+      start_timeout: "{{ omit if podman_version is version('4', 'lt') else '10' }}"
+      stop_timeout: "{{ omit if podman_version is version('4', 'lt') else '20' }}"
+    loop: "{{ containers }}"
+
+  - name: Start container
+    ansible.builtin.systemd:
+      name: 'container-{{ item|lower }}'
+      daemon_reload: true
+      state: restarted
+      enabled: true
+      scope: user
+    loop: "{{ containers }}"
+
+
+#
+# Monitoring
+
+- name: CRON Restart unhealthy containers
+  ansible.builtin.cron:
+    name: '{{ item}}: Restart unhealthy'
+    job: "podman ps -f name={{ item }} -f health=unhealthy --format {% raw %}'container-{{ .Names }}'{% endraw %}|xargs systemctl --user restart"
+  loop: "{{ containers }}"
+
+
+#
+# django_drf: Update service
+
+- block:
+  
+  - name: Load dotenv files
+    ansible.builtin.slurp:
+      src: '{{ item.dotenv }}'
+    loop: '{{ docker_projects }}'
+    loop_control:
+      label: '{{ item.dotenv }}'
+    register: dotenv_files
+  
+  - name: List Services
+    uri:
+      url: '{{ django_drf_url }}/api/services/?server={{ server.id }}'
+      method: GET
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ django_drf_token }}"
+      body_format: json
+      status_code: 200
+      validate_certs: false
+    when: django_drf_url is defined
+    delegate_to: localhost
+    register: services_list
+
+  - name: Create or update Service
+    uri:
+      url: '{{ url }}'
+      method: '{{ method }}'
+      headers:
+        Content-Type: application/json
+        Authorization: "Bearer {{ django_drf_token }}"
+      body_format: json
+      body:
+        type: lin_svc
+        path: '{{ item.path }}'
+        config: '{{ item.config|b64decode|trim }}'
+        server: '{{ server.id|int }}'
+        name: "{{ service.name|default(item.name|lower) }}"
+        description: "{{ service.description|default('Container Podman (utente: ' + ansible_user + ')') }}"
+        info: '{{ service.info|default(omit) }}'
+        active: '{{ service.active|default(omit) }}'
+        version: '{{ service.version|default(omit) }}'
+        connection: '{{ service.connection|default(omit) }}'
+        interfaces: '{{ service.interfaces|default(omit) }}'
+        credential: '{{ service.credential|default(omit) }}'
+        production: '{{ service.production|default(omit) }}'
+      status_code: [200, 201]
+      validate_certs: false
+    when:
+    - django_drf_url is defined
+    - filtered_services|length < 2
+    - not exists or service.config != item.config|b64decode|trim|b64encode
+    changed_when:
+    - (method == 'POST' and posted_service.status == 201) or
+      (method == 'PUT'  and posted_service.status == 200)
+    failed_when:
+    - (method == 'POST' and not posted_service.status == 201) or
+      (method == 'PUT'  and not posted_service.status == 200)
+    vars:
+      query: "results[*].{name: item.name, path: item.project_base, config: content}"
+      filtered_services: "{{ services_list.json.data|selectattr('path', 'equalto', item.path) }}"
+      exists: '{{ True if filtered_services|length == 1 else False }}'
+      service: "{{ filtered_services|first if exists else {} }}"
+      method: "{{ 'PUT' if exists else 'POST' }}"
+      url: |-
+        {{
+          [django_drf_url, 'api/services', service.id|string + '/']|path_join if exists else
+          [django_drf_url, 'api/services/']|path_join
+        }}
+    loop: '{{ dotenv_files|json_query(query) }}'
+    loop_control:
+      label: '{{ item.name }}'
+    delegate_to: localhost
+    register: posted_service
+
+...

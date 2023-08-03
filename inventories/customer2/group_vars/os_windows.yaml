@@ -1,0 +1,21 @@
+---
+# file: group_vars/os_windows.yaml
+
+ansible_connection: psrp
+ansible_psrp_auth : ntlm
+ansible_psrp_port : 5985
+ansible_psrp_protocol: http
+# ansible_psrp_proxy: socks5://127.0.0.1:1080
+
+
+#
+# Credentials
+
+ansible_user: user@domain2.local
+ansible_password: S3cr3t
+
+
+#
+# Varie
+
+...

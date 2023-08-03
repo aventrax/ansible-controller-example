@@ -1,0 +1,10 @@
+---
+# file: group_vars/os_linux.yaml
+
+ansible_port: 22
+ansible_user: root
+ansible_connection: ssh
+# ansible_ssh_common_args: '-o ProxyCommand="ssh -W %h:%p -q root@127.0.0.1"'
+ansible_python_interpreter: /usr/bin/python3
+
+...

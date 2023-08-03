@@ -1,0 +1,39 @@
+---
+# tasks/install_debian.yaml
+
+- name: Install required packages
+  ansible.builtin.apt:
+    name: '{{ packages }}'
+  environment: '{{ proxy_env|default(omit) }}'
+  vars:
+    packages:
+    - build-essential
+    - curl
+    - git
+    - jq
+    - tree
+    - podman
+
+- block:
+  - name: Install podman-compose
+    ansible.builtin.pip:
+      name: podman-compose
+      extra_args: --user
+  rescue:
+  - name: Install podman-compose
+    ansible.builtin.pip:
+      name: podman-compose
+      extra_args: --user --break-system-packages
+  environment: '{{ proxy_env|default(omit) }}'
+  no_log: true
+  become: true
+  become_user: '{{ docker_user }}'
+
+# BUG: https://bugs.launchpad.net/ubuntu/+source/libpod/+bug/2024394
+- name: Podman FIX for Ubuntu 22.04
+  ansible.builtin.apt:
+    deb: http://archive.ubuntu.com/ubuntu/pool/universe/g/golang-github-containernetworking-plugins/containernetworking-plugins_1.1.1+ds1-1_amd64.deb
+  environment: '{{ proxy_env|default(omit) }}'
+  when: ansible_facts['os_family']|lower == 'debian' and ansible_facts['lsb']['id']|lower == 'ubuntu' and ansible_facts['lsb']['major_release'] == '22'
+
+...

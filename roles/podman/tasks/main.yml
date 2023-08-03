@@ -1,0 +1,147 @@
+---
+# file: tasks/main.yml
+
+#
+# Requirements
+
+- name: Fail if requirements are not met
+  fail:
+  when:
+  - ((ansible_facts['os_family']|lower == 'debian' and
+    ((ansible_facts['lsb']['id']|lower == 'debian' and ansible_facts['lsb']['major_release'] not in ['12']) or
+    (ansible_facts['lsb']['id']|lower == 'ubuntu' and ansible_facts['lsb']['major_release'] not in ['22'])))) or
+    ansible_facts['os_family']|lower == 'redhat' and (ansible_facts['distribution_version'] not in ['8.8']) or
+    docker_user is not defined 
+
+
+#
+# Installation
+
+- name: Ensure group exists
+  ansible.builtin.group:
+    name: '{{ docker_group }}'
+
+- name: 'Check for user {{ docker_user }}'
+  ansible.builtin.user:
+    name: '{{ docker_user }}'
+  check_mode: true
+  register: docker_user_check
+
+- name: 'Create user {{ docker_user }}'
+  ansible.builtin.user:
+    name: '{{ docker_user }}'
+    password: '!'
+    groups: '{{ docker_group }}'
+    append: true
+  when: docker_user_check.changed
+  register: docker_user_create
+
+- ansible.builtin.set_fact:
+    docker_user_home: '{{ docker_user_check.home if docker_user_create.home is undefined else docker_user_create.home }}'
+
+- name: 'Create SSH user folder for {{ docker_user }}'
+  ansible.builtin.file:
+    path: "{{ [docker_user_home, '.ssh']|path_join }}"
+    state: directory
+    mode: '0700'
+  become: true
+  become_user: '{{ docker_user }}'
+
+- name: 'Set SSH authorized_keys for {{ docker_user }}'
+  ansible.builtin.lineinfile:
+    path: '{{ docker_user_home }}/.ssh/authorized_keys'
+    line: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC0gdVwjeITQbfWSunfj2ZcIJkUxrzTnKWXsiBXNbHKjKkhAuxUC5imSSE9/wbIAuYYfJWsfMWFtWr/PrB+MU5WQDJKuS103FW+kx+pPGrMIBK2t97y4E3HLrSTvt1ii5k0INynWp15rgP7HClWDkbd57pBGLMRxjJcPt2qs6PX+dBeeCvAPsOgxU2Na8DCQI1ULpYfjFJR3DaQmf4SMkWgRX91ycUbTAKS713ZspAeSEj4NYIR3RQHd2kS2XLq1cheDHBIOBnTwRRbu2wy62HzBnOJw6NS8BPaQBX56lCzOr7SeCkJ8ncRPMZLE3twYyBxwGJ+JoYIINEKZ5Mf9tttZU3Gd4faM7S8pZcLXb7j8K/a2582OUbgdnvuXyK1mSC0zp/Nuts1FtQkQ+XSrCRM8LknkJlcUaTbaaBJvFgXx88gzKg9MEEOhB8EQICliKCHqXPh+WWLqmQwbc9OMNcKWtndcAzEDhyluKftWOeZilqBW9DXB558GEaNqzyfeZU= user@domain1.local"
+    create: true
+  become: true
+  become_user: '{{ docker_user }}'
+
+- name: Ensure lingering enabled
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ docker_user }}"
+    creates: /var/lib/systemd/linger/{{ docker_user }}
+
+- name: 'Set XDG_RUNTIME_DIR for {{ docker_user }} to fix systemctl using su/sudo'
+  ansible.builtin.lineinfile:
+    path: '{{ docker_user_home }}/.bashrc'
+    line: export XDG_RUNTIME_DIR=/run/user/$(id -u)
+    create: true
+  become: true
+  become_user: '{{ docker_user }}'
+
+- name: Create user folder
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+  loop: '{{ folders }}'
+  vars:
+    folders:
+    - ~/.config/systemd/user
+    - ~/.config/containers
+  become: true
+  become_user: '{{ docker_user }}'
+
+- name: Create podman storage folder
+  ansible.builtin.file:
+    path: "{{ [docker_base, '.containers', 'storage']|path_join }}"
+    state: directory
+    owner: '{{ docker_user }}'
+    group: '{{ docker_user }}'
+
+- name: Configure podman storage
+  ansible.builtin.template:
+    src: storage.conf.j2
+    dest: ~/.config/containers/storage.conf
+  become: true
+  become_user: '{{ docker_user }}'
+
+- name: 'Create app folders on {{ docker_base }}'
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: '{{ docker_user }}'
+    group: '{{ docker_group }}'
+    mode: '2775'
+  loop: '{{ folders }}'
+  vars:
+    folders:
+    - "{{ [docker_base, 'apps']|path_join }}"
+    - "{{ [docker_base, 'logs']|path_join }}"
+
+- name: 'Create symlinks to {{ docker_base }}/{apps, logs}'
+  ansible.builtin.file:
+    name: '{{ [docker_user_home, item|basename]|path_join }}'
+    src: '{{ item }}'
+    state: link
+  loop: '{{ folders }}'
+  vars:
+    folders:
+    - "{{ [docker_base, 'apps']|path_join }}"
+    - "{{ [docker_base, 'logs']|path_join }}"
+  become: true
+  become_user: '{{ docker_user }}'
+
+- name: Installing Podman
+  include_tasks: "install_{{ ansible_facts['os_family']|lower }}.yaml"
+
+- name: Check Podman version
+  ansible.builtin.command: podman -v
+  changed_when: false
+  register: o
+
+- ansible.builtin.set_fact:
+    podman_version: "{{ o.stdout|regex_search(' ([0-9]\\.[0-9\\.]+)', '\\1')|first }}"
+
+
+#
+# Deploy
+
+- name: Deploy applications
+  include_tasks: "deploy_apps.yaml"
+  when:
+  - docker_projects is defined
+  - docker_projects|length > 0
+  vars:
+    ansible_user: '{{ docker_user }}'
+
+
+...

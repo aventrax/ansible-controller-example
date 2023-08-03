@@ -1,0 +1,7 @@
+---
+# file: defaults/main.yml
+
+docker_base: /dockerbase
+docker_group: dockergroup
+
+...

@@ -1,0 +1,32 @@
+---
+# tasks/install_redhat.yaml
+
+- name: Install required packages
+  ansible.builtin.dnf:
+    name: '{{ packages }}'
+  environment: '{{ proxy_env|default(omit) }}'
+  vars:
+    packages:
+    - curl
+    - git
+    - jq
+    - tree
+    - nmap-ncat
+    - podman
+
+- name: Install podman-compose
+  ansible.builtin.pip:
+    name: podman-compose
+    extra_args: --user
+  become: true
+  become_user: '{{ docker_user }}'
+
+- name: Configure max_user_namespaces
+  lineinfile:
+    path: /etc/sysctl.d/podman.conf
+    regexp: '^user.max_user_namespaces'
+    line: user.max_user_namespaces=10000
+    create: true
+  notify: reload sysctl
+
+...
